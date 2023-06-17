@@ -21,11 +21,11 @@
 #define PUMP_TARGET_2 270 // 600ml
 #define PUMP_TARGET_3 450 // 1000ml
 
-#define BTN_0 (PIND & (1 << 0))
-#define BTN_1 (PIND & (1 << 1))
-#define BTN_2 (PIND & (1 << 5))
-#define BTN_3 (PIND & (1 << 6))
-#define BTN_4 (PIND & (1 << 7))
+#define BTN_0 (!(PIND & (1 << 0)))
+#define BTN_1 (!(PIND & (1 << 1)))
+#define BTN_2 (!(PIND & (1 << 5)))
+#define BTN_3 (!(PIND & (1 << 6)))
+#define BTN_4 (!(PIND & (1 << 7)))
 #define BUZZER_0 (PIND & (1 << 3))
 #define PUMP_0 (PIND & (1 << 4))
 #define REST 8505 // Остаток воды бутылке (кол-во в импульсах)
@@ -36,13 +36,16 @@ uint32_t rest = REST; // Остаток воды в бутылке
 uint8_t dots = 0b0100;
 uint32_t pump_target = 0;
 uint8_t buzzer_on_counter = 0;
-uint8_t button_down = 0b00000;
-uint8_t button_up = 0b00000;
-uint8_t button_state = 0b00000;
-uint8_t button_press_short = 0b00000;
-uint8_t button_press_reg = 0b00000;
-uint32_t button_press_counter[] = {0, 0, 0, 0, 0};
+//uint8_t button_down = 0b00000;
+//uint8_t button_up = 0b00000;
+uint8_t button_state = 0b00000000;
+//uint8_t button_press_short = 0b00000;
+//uint8_t button_press_reg = 0b00000;
+//uint32_t button_press_counter[] = {0, 0, 0, 0, 0};
 uint32_t button_press_counter_global = 0;
+uint32_t timer0 = 0;
+uint32_t button_press_counter = 0;
+uint8_t button_reg = 0b000; // 0 - флаг готовности к обработке сочетания клавишь | 1 - флаг сброса клавиатуры (все клавиши были отпущены)
 
 void display(uint32_t n, uint8_t dots)  {
 	//uint32_t n = counter;
@@ -203,87 +206,13 @@ ISR(TIMER0_OVF_vect)
 		buzzer_on_counter--;
 	}
 	
-	if (BTN_0) { // Кнопка 0
-		button_state &= ~(1 << 0);
-	} else {
-		button_state |= (1 << 0);
-	}
-	
-	if (BTN_1) { // Кнопка 1
-		button_state &= ~(1 << 1);
-	}
-	else {
-		button_state |= (1 << 1);
-	}
-	
-	if (BTN_2) { // Кнопка 2
-		button_state &= ~(1 << 2);
-	}
-	else {
-		button_state |= (1 << 2);
-	}
-	
-	if (BTN_3) { // Кнопка 3
-		button_state &= ~(1 << 3);
-	}
-	else {
-		button_state |= (1 << 3);
-	}
-	
-	if (BTN_4) { // Кнопка 4
-		button_state &= ~(1 << 4);
-	}
-	else {
-		button_state |= (1 << 4);
-	}
-	
-	
-	if (button_state == 0x00) {
-		button_press_counter_global = 0;
-	}
-	else {
-		button_press_counter_global++;		
-	}
-	
-	for (uint8_t i = 0; i < 5; i++) {
-		if (button_state & (1 << i)) {
-			button_press_counter[i]++;
-		}		
-	}
-	
-	if (button_press_counter_global == BTN_PRESS_LONG) {
-		button_press_reg |= (1 << 7); // Старший бит = 1, означет длительное нажатие кнопок
-		
-		for(uint8_t i = 0; i < 5; i++) {
-			if (button_press_counter[i] > BTN_PRESS_SHORT) {
-				button_press_reg |= (1 << i);				
-			}
-			else {
-				button_press_reg &= ~(1 << i);				
-			}						
-		}
-	}
-	else if (button_state == 0x00) {		
-		button_press_reg &= ~(1 << 7); // Старший бит = 0, означет короткое нажатие кнопок
-		
-		for (uint8_t i = 0; i < 5; i++) {				
-			if ((button_press_counter[i] > BTN_PRESS_SHORT)) {
-				if (button_press_counter[i] < BTN_PRESS_LONG) {
-					button_press_reg |= (1 << i);
-				}
-				
-				button_press_counter[i] = 0;
-			} else {
-				button_press_reg &= ~(1 << i);
-			}
-		}
-	}
+	button_press_counter++;
 }
 
 ISR(INT0_vect)
 {	
-	if (pump_target > 0) pump_target--;
 	rest--;
+	if (pump_target > 0) pump_target--;	
 }
 
 
@@ -305,9 +234,18 @@ void beep_long() {
 	buzzer_on_counter = BUZZER_BEEP_LONG;
 }
 
+void timer0_on() {		
+	TCCR0 |= (1 << CS02);
+}
+
+void timer0_off() {
+	TCCR0 &= ~(1 << CS02);
+	button_press_counter = 0;
+}
+
 void init() {
 	TIMSK |= (1 << TOIE0);
-	TCCR0 |= (1 << CS02); //|(1 << CS00);
+	//TCCR0 |= (1 << CS02); //|(1 << CS00);
 	
 	GICR  |= (1 << INT0); // enable INT0;
 	MCUCR |= (1 << ISC01) | (1 << ISC00);
@@ -322,64 +260,148 @@ void init() {
 	PORTD = 0b11100011;
 }
 
+//void keyboard_press_counter_on() {
+	//button_reg |= (1 << 1); // Включаем счётчик длительности нажатия кнопок
+//}
+//
+//void keyboard_press_counter_off() {
+	//button_reg &= ~(1 << 1); // Выключаем счётчик длительности нажатия кнопок
+	//button_press_counter = 0;
+//}
+
+// 0-6 - Состояние клавишь | 7 - флаг длительного нажатия
+void keyboard() {		
+	if ((BTN_0 || BTN_1 || BTN_2 || BTN_3) && (button_reg & (1 << 1))) {
+		timer0_on();
+						
+		if (BTN_0) button_state |= (1 << 0); 		
+ 		if (BTN_1) button_state |= (1 << 1);
+ 		if (BTN_2) button_state |= (1 << 2);
+ 		if (BTN_3) button_state |= (1 << 3);
+	}
+	
+	// Короткое нажатие
+	if(!BTN_0 && !BTN_1 && !BTN_2 && !BTN_3) {
+		button_reg |= (1 << 1); // Флаг сброса клавиатуры (все клавиши были отпущены)
+		
+		if ((button_press_counter > BTN_PRESS_SHORT) && (button_press_counter < BTN_PRESS_LONG)) {									
+			if (button_reg & (1 << 1)) {
+				button_state &= ~(1 << 7); // Флаг длительного нажатия (снимаем)
+				button_reg |= (1 << 0); // Флаг готовности к обработке состояниея клавишь
+				button_reg &= ~(1 << 1); // Флаг сброса клавиатуры (все клавиши были отпущены)
+			}
+		}
+		
+		timer0_off();
+						
+	}
+	// Длительное нажатие
+	else if (button_press_counter > BTN_PRESS_LONG) {
+		//if (button_reg & (1 << 1)) {
+			button_state |= (1 << 7); // Флаг длительного нажатия (устанавливаем)
+			button_reg |= (1 << 0); // Флаг готовности к обработке
+			button_reg &= ~(1 << 1); // Флаг сброса клавиатуры (все клавиши были отпущены)
+		//}				
+		
+		timer0_off();
+	}
+	
+	//}
+}
+
 int main(void)
 {
 	init();	
 	
 	while (1) {
-		display(rest * ML_PER_IMPULSE, dots);
-		//display(pump_target, dots);
+		keyboard();		
 		
-		if (pump_target > 0) {
+		if (button_reg & (1 << 1)) {
 			pump_on();
 		} else {
 			pump_off();
 		}
 		
+		//display(rest * ML_PER_IMPULSE, dots);
+		//display(button_state, dots);
+		display(counter, dots);
+		
+		//if (pump_target > 0) {
+			//pump_on();
+		//} else {
+			//pump_off();
+		//}
+		
 		if (buzzer_on_counter > 0) {
 			PORTD |= (1 << 3);
 		} else {
 			PORTD &= ~(1 << 3);
-		}		
+		}	
 		
-		switch (button_press_reg) {
-			// Длительные нажатия
-			case 0b10000001: // Кнопка 0
-			counter+=100;
-			break;
+		if (button_reg & (1 << 0)) {
+			//pump_on();
+			//_delay_ms(300);
+			//pump_off();
 			
-			case 0b10000010: // Кнопка 1
-			counter+=200;
-			break;						
+			switch (button_state) {
+				// Короткие нажатия
+				case 0b00000001:
+				counter += 1;
+				break;
+				
+				case 0b00000010:
+				counter += 2;
+				break;
+				
+				case 0b00000100:
+				counter += 3;
+				break;
+				
+				case 0b00001000:
+				counter += 4;
+				break;
+				
+				// Длительные нажатия
+				case 0b10000001:
+				counter += 100;
+				break;
+				
+				case 0b10000010:
+				counter += 200;
+				break;
+				
+				case 0b10000100:
+				counter += 300;
+				break;
+				
+				case 0b10001000:
+				counter += 400;
+				break;
+			}
 			
-			case 0b10000011: // Кнопки 0+1
-			rest = REST;
-			beep_long();
-			break;
-			
-			case 0b10000101:  // Кнопки 0+2
-			counter+=500;
-			break;
-			
-			
-			// Короткие нажатия
-			case 0b00000001: // Кнопка 0
-			pump_target = PUMP_TARGET_0 - FLOW_INERTION;
-			break;
-			
-			case 0b00000010: // Кнопка 1
-			pump_target = PUMP_TARGET_1 - FLOW_INERTION;
-			break;
-			
-			case 0b00000100: // Кнопка 2
-			pump_target = PUMP_TARGET_2 - FLOW_INERTION;
-			break;
-			
-			case 0b00001000: // Кнопка 3
-			pump_target = PUMP_TARGET_3 - FLOW_INERTION;
-			break;
+			button_reg &= ~(1 << 0);
+			button_state = 0;
 		}
 		
-		button_press_reg = 0;
+		//switch (button_press_reg) {
+			//// Короткие нажатия
+			//case 0b00000001: // Кнопка 0
+			//pump_target = PUMP_TARGET_0 - FLOW_INERTION;
+			//break;
+			//
+			//case 0b00000010: // Кнопка 1
+			//pump_target = PUMP_TARGET_1 - FLOW_INERTION;
+			//break;
+			//
+			//case 0b00000100: // Кнопка 2
+			//pump_target = PUMP_TARGET_2 - FLOW_INERTION;
+			//break;
+			//
+			//case 0b00001000: // Кнопка 3
+			//pump_target = PUMP_TARGET_3 - FLOW_INERTION;
+			//break;
+		//}
+		//
+		//button_press_reg = 0;
 	}
 }
