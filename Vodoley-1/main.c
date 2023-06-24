@@ -236,6 +236,8 @@ void pump_on() {
 }
 
 void pump_off() {
+	if (PUMP_0) beep_short();
+	
 	pump_target = 0;
 	pump_target_last = 0;
 	
