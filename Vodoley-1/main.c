@@ -4,22 +4,27 @@
 * Created: 5/29/2023 12:53:59 AM
 *  Author: wolf-
 */
-#define F_CPU 8000000UL
+#define F_CPU 16000000UL
 
 #include <xc.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
+#include <avr/eeprom.h>
+
+// Частота прерывания Таймера-2 ~61 раз/секунда
 
 #define DELAY 1000
 #define FLOW_INERTION 10 // Количество тиков счётчика потока энерции воды
 #define BTN_PRESS_SHORT 7
 #define BTN_PRESS_LONG 200
-#define BUZZER_BEEP_SHORT 25
-#define BUZZER_BEEP_LONG 200
+#define BUZZER_SHORT_TIMER 30
+#define BUZZER_LONG_TIMER 100
 #define PUMP_TARGET_0 90 // 200ml
 #define PUMP_TARGET_1 180 // 400ml
 #define PUMP_TARGET_2 270 // 600ml
 #define PUMP_TARGET_3 450 // 1000ml
+#define PUMP_CHECK 180
+#define EEPROM_TIMER 610
 
 #define BTN_0 (!(PIND & (1 << 0)))
 #define BTN_1 (!(PIND & (1 << 1)))
@@ -28,19 +33,23 @@
 #define BTN_4 (!(PIND & (1 << 7)))
 #define BUZZER_0 (PIND & (1 << 3))
 #define PUMP_0 (PIND & (1 << 4))
-#define REST 8505 // Остаток воды бутылке (кол-во в импульсах)
+#define REST 8505 // Остаток воды бутылке (кол-во в импульсах, 10 импульсов = 45мл)
 #define ML_PER_IMPULSE 0.22222222 // Кол-во миллилитров жидкости на 1 импульс счётчика
 
-uint32_t counter = 0;
+
 uint32_t rest = REST; // Остаток воды в бутылке (емкости)
-uint8_t dots = 0b0100;
-uint32_t pump_target = 0;
-uint8_t buzzer_on_counter = 0;
-uint8_t button_state = 0b00000000;
-uint32_t button_press_counter_global = 0;
-uint32_t timer0 = 0;
-uint32_t button_press_counter = 0;
+uint32_t rest_eeprom = 0; // Остаток воды в бутылке (записанный в память EEPROM)
+uint8_t dots = 0b0100; // Какие точки отображать на дисплее (0, 1, 2, 3)
+uint32_t pump_target = 0; // Количество импульсов счётчика которые должна прокачать помпа
+uint32_t pump_target_last = 0; // Последнее записанное в EEPROM занение
+uint8_t button_state = 0b00000000; // Флаги состояния кнопок
+uint32_t button_press_counter = 0; // Счётчик того, сколько была нажата клавиша (для определения коротких и длительных нажатий)
 uint8_t button_reg = 0b000; // 0 - флаг готовности к обработке сочетания клавишь | 1 - флаг сброса клавиатуры (все клавиши были отпущены)
+uint32_t timer0 = 0; 
+uint32_t timer2_pump = 0; // Таймер для помпы (автоотключение в случе отсутствия подачи воды)
+uint8_t timer2_buzzer = 0; // Таймер зуммера
+uint32_t timer2_eeprom = 0; // Таймер записи в память (что бы избежать постоянной записи в память при изменении остатка воды)
+
 
 void display(uint32_t n, uint8_t dots)  {
 	//uint32_t n = counter;
@@ -195,16 +204,26 @@ void display(uint32_t n, uint8_t dots)  {
 	}
 }
 
-ISR(TIMER0_OVF_vect)
-{
-	if (buzzer_on_counter > 0) {
-		buzzer_on_counter--;
-	}
-	
+ISR(TIMER0_OVF_vect) // Прерывания Таймер-0
+{		
 	button_press_counter++;
 }
 
-ISR(INT0_vect) // Прерывание счётчика
+ISR(TIMER2_OVF_vect) { // Прерывания Таймер-2	
+	if (BUZZER_0 && timer2_buzzer > 0) {
+		timer2_buzzer--;
+	}
+	
+	if (PUMP_0 && timer2_pump > 0) {
+		timer2_pump--;
+	}
+	
+	if (timer2_eeprom > 0) {
+		timer2_eeprom--;
+	}
+}
+
+ISR(INT0_vect) // Прерывание счётчика воды
 {	
 	if (rest > 0) rest--;	
 	if (pump_target > 0) pump_target--;	
@@ -218,16 +237,18 @@ void pump_on() {
 
 void pump_off() {
 	pump_target = 0;
+	pump_target_last = 0;
+	
 	PORTD &= ~(1 << 4);
 	dots &= ~(1 << 0);	
 }
 
 void beep_short() {
-	buzzer_on_counter = BUZZER_BEEP_SHORT;
+	timer2_buzzer = BUZZER_SHORT_TIMER;
 }
 
 void beep_long() {
-	buzzer_on_counter = BUZZER_BEEP_LONG;
+	timer2_buzzer = BUZZER_LONG_TIMER;
 }
 
 void timer_buttons_on() {		
@@ -241,13 +262,14 @@ void timer_buttons_off() {
 
 void init() {
 	TIMSK |= (1 << TOIE0);
-	//TCCR0 |= (1 << CS02); //|(1 << CS00);
+	TIMSK |= (1 << TOIE2); // Частота срабатывания таймера примерно 61 раз/секунда
 	
 	GICR  |= (1 << INT0); // enable INT0;
 	// Прерывание по ниспадающему фронту
 	MCUCR &= ~(1 << ISC00);
 	MCUCR |= (1 << ISC01);
-	sei();
+		
+	sei(); // Включаем прерывания
 	
 	DDRB = 0xFF;
 	DDRC = 0xFF;
@@ -256,6 +278,11 @@ void init() {
 	PORTB = 0x00;
 	PORTC = 0x00;
 	PORTD = 0b11101011;
+	
+	eeprom_read_block(&rest, 0, sizeof(rest));
+	rest_eeprom = rest;
+	
+	beep_short();
 }
 
 // 0-6 - Состояние клавишь | 7 - флаг длительного нажатия
@@ -295,24 +322,53 @@ void keyboard() {
 
 int main(void)
 {
-	init();	
+	init(); // Инициализация
 	
 	while (1) {
-		keyboard();		
+		// Записываем остаток воды в память, если он не был записан ранее
+		if (!PUMP_0 && rest != rest_eeprom && timer2_eeprom == 0) {			
+			rest_eeprom = rest;
+			eeprom_update_block(&rest, 0, sizeof(rest));
+			timer2_eeprom = EEPROM_TIMER; // Задержка, что бы избежать постоянной записи в память при изменении счётчика (экономим циклы перезаписи памяти)
+		}
+				
+		if (timer2_pump > 0 || timer2_buzzer > 0 || timer2_eeprom > 0) { // Включаем Таймер-2 если есть что считать
+			TCCR2 |= (1 << CS20) | (1 << CS21) | (1 << CS22);
+		} else {
+			TCCR2 &= ~(1 << CS20);
+			TCCR2 &= ~(1 << CS21);
+			TCCR2 &= ~(1 << CS22);
+		}
 		
-		if(PUMP_0 && pump_target > 0) {
+		// Включаем/выключаем зуммер
+		if (timer2_buzzer > 0) {
+			PORTD |= (1 << PIND3);
+		} else {
+			PORTD &= ~(1 << PIND3);
+		}
+		
+		keyboard(); // Обработка нажатия клавиш
+				
+		if (PUMP_0 && pump_target > 0) { // Если помпа помпа включена
 			display((pump_target + FLOW_INERTION) * ML_PER_IMPULSE * 10, 0b0001);
+			
+			if (pump_target != pump_target_last) {
+				pump_target_last = pump_target;
+				timer2_pump = PUMP_CHECK;
+			}
+			else if (timer2_pump == 0) {
+				pump_off();
+				beep_long();
+			}
 		} else {
 			display(rest * ML_PER_IMPULSE, dots);
-		}		
-		//display(button_state, dots);
-		//display(counter, dots);
+		}
 		
-		if (buzzer_on_counter > 0) {
+		if (timer2_buzzer > 0) {
 			PORTD |= (1 << 3);
 		} else {
 			PORTD &= ~(1 << 3);
-		}
+		}		
 				
 		if (BTN_4) {
 			button_state |= (1 << 4);
@@ -331,69 +387,55 @@ int main(void)
 			pump_off();
 		}
 		
-		if (button_reg & (1 << 0)) {
-			//pump_on();
-			//_delay_ms(300);
-			//pump_off();
-			
+		if (button_reg & (1 << 0)) {			
 			button_reg &= ~(1 << 0); // Снимаем флаг готовности к обработке состояния кнопок
 			
-			if(PUMP_0) {
+			// Если включена помпа или зуммер - выключаем её (сделано для безопасности)
+			if (PUMP_0 || timer2_buzzer > 0) {
 				pump_off();
 				continue;
 			}
-
 			
 			switch (button_state) {
-				// Короткие нажатия				
-				// Кнопка 0
-				case 0b00000001:
+				// Короткие нажатия								
+				case 0b00000001: // Кнопка 0
 				pump_target = PUMP_TARGET_0 - FLOW_INERTION;
 				break;
-				
-				// Кнопка 1
-				case 0b00000010:
+								
+				case 0b00000010: // Кнопка 1
 				pump_target = PUMP_TARGET_1 - FLOW_INERTION;
 				break;
-				
-				// Кнопка 2
-				case 0b00000100:
+								
+				case 0b00000100: // Кнопка 2
 				pump_target = PUMP_TARGET_2 - FLOW_INERTION;
 				break;
-				
-				// Кнопка 3
-				case 0b00001000:
+								
+				case 0b00001000: // Кнопка 3
 				pump_target = PUMP_TARGET_3 - FLOW_INERTION;
 				break;
 				
-				// Длительные нажатия
-				// Кнопка 0
-				case 0b10000001:
-				
-				break;
-				
-				// Кнопка 1
-				case 0b10000010:
-				
-				break;
-				
-				// Кнопка 2
-				case 0b10000100:
-				
-				break;
-				
-				// Кнопка 3
-				case 0b10001000:
+				// Длительные нажатия				
+				case 0b10000001: // Кнопка 0
 				
 				break;
 								
-				// Кнопка 0+1
-				case 0b10000011:
+				case 0b10000010: // Кнопка 1
+				
+				break;
+								
+				case 0b10000100: // Кнопка 2
+				
+				break;
+								
+				case 0b10001000: // Кнопка 3
+				
+				break;
+												
+				case 0b10000011: // Кнопка 0+1
 				rest = REST;
+				beep_long();
 				break;
 			}
-			
-			//button_reg &= ~(1 << 0); // Снимаем флаг готовности к обработке состояния кнопок
 		}
 	}
 }
