@@ -4,12 +4,23 @@
 * Created: 5/29/2023 12:53:59 AM
 *  Author: wolf-
 */
-#define F_CPU 16000000UL
+#define F_CPU 1000000UL
 
 #include <xc.h>
 #include <util/delay.h>
 #include <avr/interrupt.h>
 #include <avr/eeprom.h>
+
+/*#define TM1637_DELAY asm("nop");*/
+#define TM1637_DELAY _delay_us(50);
+
+#define DOT 0x80
+#define DDR_0 DDRB
+#define PORT_0 PORTB
+#define DIO_0 2 // PORTD-0
+#define CLK_0 1 //PORTD-1
+
+uint8_t digits[] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
 
 // Частота прерывания Таймера-2 ~61 раз/секунда
 
@@ -50,6 +61,87 @@ uint32_t timer2_pump = 0; // Таймер для помпы (автоотключение в случе отсутствия
 uint8_t timer2_buzzer = 0; // Таймер зуммера
 uint32_t timer2_eeprom = 0; // Таймер записи в память (что бы избежать постоянной записи в память при изменении остатка воды)
 
+void TM1637_start() {
+	DDR_0 |= (1 << CLK_0); // CLOCK
+	DDR_0 |= (1 << DIO_0); // DATA
+		
+	PORT_0 |= (1 << CLK_0); // CLOCK
+	PORT_0 |= (1 << DIO_0); // DATA
+	TM1637_DELAY
+		
+	PORT_0 &= ~(1 << DIO_0); // DATA
+	PORT_0 &= ~(1 << CLK_0); // CLOCK
+	TM1637_DELAY		
+}
+
+void TM1637_stop() {	
+	DDR_0 |= (1 << CLK_0); // CLOCK
+	DDR_0 |= (1 << DIO_0); // DATA
+		
+	PORT_0 &= ~(1 << CLK_0); // CLOCK
+	PORT_0 &= ~(1 << DIO_0); // DATA
+	TM1637_DELAY
+		
+	PORT_0 |= (1 << CLK_0); // CLOCK
+	PORT_0 |= (1 << DIO_0); // DATA
+	TM1637_DELAY		
+}
+
+void TM1637_send_byte(uint8_t value) {	
+	for (uint8_t i = 0; i < 8; i++) {
+		PORT_0 &= ~(1 << CLK_0); // CLOCK=0
+		TM1637_DELAY
+			
+		if ((value >> i) & 1) { // Передача байта
+			PORT_0 |= (1 << DIO_0);
+			} else {
+			PORT_0 &= ~(1 << DIO_0);
+		}
+			
+		TM1637_DELAY
+		PORT_0 |= (1 << CLK_0); // CLOCK=1
+		TM1637_DELAY
+	}
+		
+	PORT_0 &= ~(1 << CLK_0); // CLOCK=0
+	TM1637_DELAY
+	PORT_0 |= (1 << CLK_0); // CLOCK=1
+	TM1637_DELAY		
+}
+
+void TM1637_set_brightness(uint8_t brightness) { // 0-7
+	if (brightness > 7) {
+		brightness = 7;
+	}
+	
+	TM1637_start();
+	TM1637_send_byte(0x88 + brightness);
+	TM1637_stop();
+}
+
+void TM1637_init(void) {
+	TM1637_set_brightness(1); // Яркость дисплея 1
+	
+	TM1637_start();
+	TM1637_send_byte(0xC0); // вывод с 1-го разряда.
+	TM1637_send_byte(digits[7]);
+	TM1637_send_byte(digits[2]);
+	TM1637_send_byte(digits[9]);
+	TM1637_send_byte(digits[9]);
+	TM1637_stop();
+}
+
+void TM1637_number(uint32_t value, uint8_t dot) { // Берём число с запасом, для больших дисплеев
+	TM1637_start();
+	TM1637_send_byte(0xC0); // вывод с 1-го разряда.
+	
+	TM1637_send_byte(digits[value / 1000 % 10] + (dot == 1 ? DOT : 0));
+	TM1637_send_byte(digits[value / 100 % 10] + (dot == 2 ? DOT : 0));
+	TM1637_send_byte(digits[value / 10 % 10] + (dot == 3 ? DOT : 0));
+	TM1637_send_byte(digits[value % 10] + (dot == 4 ? DOT : 0));
+
+	TM1637_stop();
+}
 
 void display(uint32_t n, uint8_t dots)  {
 	//uint32_t n = counter;
@@ -326,118 +418,126 @@ int main(void)
 {
 	init(); // Инициализация
 	
-	while (1) {
-		// Записываем остаток воды в память, если он не был записан ранее
-		if (!PUMP_0 && rest != rest_eeprom && timer2_eeprom == 0) {			
-			rest_eeprom = rest;
-			eeprom_update_block(&rest, 0, sizeof(rest));
-			timer2_eeprom = EEPROM_TIMER; // Задержка, что бы избежать постоянной записи в память при изменении счётчика (экономим циклы перезаписи памяти)
-		}
-				
-		if (timer2_pump > 0 || timer2_buzzer > 0 || timer2_eeprom > 0) { // Включаем Таймер-2 если есть что считать
-			TCCR2 |= (1 << CS20) | (1 << CS21) | (1 << CS22);
-		} else {
-			TCCR2 &= ~(1 << CS20);
-			TCCR2 &= ~(1 << CS21);
-			TCCR2 &= ~(1 << CS22);
-		}
-		
-		// Включаем/выключаем зуммер
-		if (timer2_buzzer > 0) {
-			PORTD |= (1 << PIND3);
-		} else {
-			PORTD &= ~(1 << PIND3);
-		}
-		
-		keyboard(); // Обработка нажатия клавиш
-				
-		if (PUMP_0 && pump_target > 0) { // Если помпа помпа включена
-			display((pump_target + FLOW_INERTION) * ML_PER_IMPULSE * 10, 0b0001);
-			
-			if (pump_target != pump_target_last) {
-				pump_target_last = pump_target;
-				timer2_pump = PUMP_CHECK;
-			}
-			else if (timer2_pump == 0) {
-				pump_off();
-				beep_long();
-			}
-		} else {
-			display(rest * ML_PER_IMPULSE, dots);
-		}
-		
-		if (timer2_buzzer > 0) {
-			PORTD |= (1 << 3);
-		} else {
-			PORTD &= ~(1 << 3);
-		}		
-				
-		if (BTN_4) {
-			button_state |= (1 << 4);
-			pump_target = 0;
-			pump_on();			
-		}
-		else if (!BTN_4 && (button_state & (1 << 4))) {
-			button_state &= ~(1 << 4);
-			pump_target = 0;
-			pump_off();
-		}
-		else if (pump_target > 0) {
-			pump_on();
-		}
-		else {
-			pump_off();
-		}
-		
-		if (button_reg & (1 << 0)) {			
-			button_reg &= ~(1 << 0); // Снимаем флаг готовности к обработке состояния кнопок
-			
-			// Если включена помпа или зуммер - выключаем её (сделано для безопасности)
-			if (PUMP_0 || timer2_buzzer > 0) {
-				pump_off();
-				continue;
-			}
-			
-			switch (button_state) {
-				// Короткие нажатия								
-				case 0b00000001: // Кнопка 0
-				pump_target = PUMP_TARGET_0 - FLOW_INERTION;
-				break;
-								
-				case 0b00000010: // Кнопка 1
-				pump_target = PUMP_TARGET_1 - FLOW_INERTION;
-				break;
-								
-				case 0b00000100: // Кнопка 2
-				pump_target = PUMP_TARGET_2 - FLOW_INERTION;
-				break;
-								
-				case 0b00001000: // Кнопка 3
-				pump_target = PUMP_TARGET_3 - FLOW_INERTION;
-				break;
-				
-				// Длительные нажатия				
-				case 0b10000001: // Кнопка 0
-				
-				break;
-								
-				case 0b10000010: // Кнопка 1
-				
-				break;
-								
-				case 0b10000100: // Кнопка 2
-				
-				break;
-								
-				case 0b10001000: // Кнопка 3
-				
-				break;
-												
-				case 0b10000011: // Кнопка 0+1
-				rest = REST;
-				beep_long();
-				break;
-			}
-		}
+	TM1637_init();
+	TM1637_number(8888, 2);
+	for (uint16_t i = 0; i <= 9999; i++) {
+		TM1637_number(i, 2);
+		_delay_ms(10);
 	}
+	
+	
+	//while (1) {
+		//// Записываем остаток воды в память, если он не был записан ранее
+		//if (!PUMP_0 && rest != rest_eeprom && timer2_eeprom == 0) {			
+			//rest_eeprom = rest;
+			//eeprom_update_block(&rest, 0, sizeof(rest));
+			//timer2_eeprom = EEPROM_TIMER; // Задержка, что бы избежать постоянной записи в память при изменении счётчика (экономим циклы перезаписи памяти)
+		//}
+				//
+		//if (timer2_pump > 0 || timer2_buzzer > 0 || timer2_eeprom > 0) { // Включаем Таймер-2 если есть что считать
+			//TCCR2 |= (1 << CS20) | (1 << CS21) | (1 << CS22);
+		//} else {
+			//TCCR2 &= ~(1 << CS20);
+			//TCCR2 &= ~(1 << CS21);
+			//TCCR2 &= ~(1 << CS22);
+		//}
+		//
+		//// Включаем/выключаем зуммер
+		//if (timer2_buzzer > 0) {
+			//PORTD |= (1 << PIND3);
+		//} else {
+			//PORTD &= ~(1 << PIND3);
+		//}
+		//
+		//keyboard(); // Обработка нажатия клавиш
+				//
+		//if (PUMP_0 && pump_target > 0) { // Если помпа помпа включена
+			//display((pump_target + FLOW_INERTION) * ML_PER_IMPULSE * 10, 0b0001);
+			//
+			//if (pump_target != pump_target_last) {
+				//pump_target_last = pump_target;
+				//timer2_pump = PUMP_CHECK;
+			//}
+			//else if (timer2_pump == 0) {
+				//pump_off();
+				//beep_long();
+			//}
+		//} else {
+			//display(rest * ML_PER_IMPULSE, dots);
+		//}
+		//
+		//if (timer2_buzzer > 0) {
+			//PORTD |= (1 << 3);
+		//} else {
+			//PORTD &= ~(1 << 3);
+		//}		
+				//
+		//if (BTN_4) {
+			//button_state |= (1 << 4);
+			//pump_target = 0;
+			//pump_on();			
+		//}
+		//else if (!BTN_4 && (button_state & (1 << 4))) {
+			//button_state &= ~(1 << 4);
+			//pump_target = 0;
+			//pump_off();
+		//}
+		//else if (pump_target > 0) {
+			//pump_on();
+		//}
+		//else {
+			//pump_off();
+		//}
+		//
+		//if (button_reg & (1 << 0)) {			
+			//button_reg &= ~(1 << 0); // Снимаем флаг готовности к обработке состояния кнопок
+			//
+			//// Если включена помпа или зуммер - выключаем её (сделано для безопасности)
+			//if (PUMP_0 || timer2_buzzer > 0) {
+				//pump_off();
+				//continue;
+			//}
+			//
+			//switch (button_state) {
+				//// Короткие нажатия								
+				//case 0b00000001: // Кнопка 0
+				//pump_target = PUMP_TARGET_0 - FLOW_INERTION;
+				//break;
+								//
+				//case 0b00000010: // Кнопка 1
+				//pump_target = PUMP_TARGET_1 - FLOW_INERTION;
+				//break;
+								//
+				//case 0b00000100: // Кнопка 2
+				//pump_target = PUMP_TARGET_2 - FLOW_INERTION;
+				//break;
+								//
+				//case 0b00001000: // Кнопка 3
+				//pump_target = PUMP_TARGET_3 - FLOW_INERTION;
+				//break;
+				//
+				//// Длительные нажатия				
+				//case 0b10000001: // Кнопка 0
+				//
+				//break;
+								//
+				//case 0b10000010: // Кнопка 1
+				//
+				//break;
+								//
+				//case 0b10000100: // Кнопка 2
+				//
+				//break;
+								//
+				//case 0b10001000: // Кнопка 3
+				//
+				//break;
+												//
+				//case 0b10000011: // Кнопка 0+1
+				//rest = REST;
+				//beep_long();
+				//break;
+			//}
+		//}
+	//}
 }
