@@ -14,11 +14,11 @@
 // Частота прерывания Таймера-2 ~61 раз/секунда
 
 #define DELAY 1000
-#define FLOW_INERTION 10 // Количество тиков счётчика потока энерции воды
+#define FLOW_INERTION 15 // Количество тиков счётчика потока энерции воды
 #define BTN_PRESS_SHORT 7
 #define BTN_PRESS_LONG 200
-#define BUZZER_SHORT_TIMER 30
-#define BUZZER_LONG_TIMER 100
+#define BUZZER_SHORT_TIMER 20
+#define BUZZER_LONG_TIMER 60
 #define PUMP_TARGET_0 90 // 200ml
 #define PUMP_TARGET_1 180 // 400ml
 #define PUMP_TARGET_2 270 // 600ml
@@ -268,7 +268,11 @@ void init() {
 	
 	GICR  |= (1 << INT0); // enable INT0;
 	// Прерывание по ниспадающему фронту
-	MCUCR &= ~(1 << ISC00);
+	// 	MCUCR &= ~(1 << ISC00);
+	//	MCUCR |= (1 << ISC01);
+	
+	// Прерывание по возрастающему фронту
+	MCUCR |= (1 << ISC00);
 	MCUCR |= (1 << ISC01);
 		
 	sei(); // Включаем прерывания
@@ -352,7 +356,7 @@ int main(void)
 		keyboard(); // Обработка нажатия клавиш
 				
 		if (PUMP_0 && pump_target > 0) { // Если помпа помпа включена
-			display((pump_target + FLOW_INERTION) * ML_PER_IMPULSE * 10, 0b0001);
+			display((pump_target + FLOW_INERTION) * ML_PER_IMPULSE * 10, 0b0001);			
 			
 			if (pump_target != pump_target_last) {
 				pump_target_last = pump_target;
@@ -364,6 +368,7 @@ int main(void)
 			}
 		} else {
 			display(rest * ML_PER_IMPULSE, dots);
+			//display(8888, 0);
 		}
 		
 		if (timer2_buzzer > 0) {
